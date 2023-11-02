@@ -1,21 +1,26 @@
-import mongoose from "mongoose";
-import Blog from "../model/Blog.js";
-import User from "../model/User.js";
+import { v4 as uuidv4 } from 'uuid';
 
 export const getBlogs = async (req, res, next) =>{
+    const pool = req.db;
     let blogs, totalBlogs;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 3;
 
     try {
-        totalBlogs = await Blog.countDocuments();
-        const skip = (page - 1) * limit;
-        blogs = await Blog.find()
-        .skip(skip)
-        .limit(limit);
+        const totalResult = await pool.query('SELECT COUNT(*) FROM "Blog"');
+        totalBlogs = parseInt(totalResult.rows[0].count);
+        const offset = (page - 1) * limit;
+
+        const blogQuery = await pool.query(
+            'SELECT * FROM "Blog" ORDER BY title DESC OFFSET $1 LIMIT $2',
+            [offset, limit]
+        );
+
+        blogs = blogQuery.rows;
     }
     catch (err) {
-        return console.log(err);
+        console.log(err);
+        return res.status(500).json({ message: 'Internal server error' });
     }
 
     if (!blogs){
@@ -26,125 +31,123 @@ export const getBlogs = async (req, res, next) =>{
 }
 
 export const getBlog = async (req, res, next) =>{
+    const pool = req.db;
     const blogId = req.params.id;
-    let blog;
     try {
-        blog = await Blog.findById(blogId);
+        const result = await pool.query('SELECT * FROM "Blog" WHERE id = $1', [blogId]);
+        const blog = result.rows[0];
+    
+        if (!blog) {
+          return res.status(404).json({ message: 'Blog not found' });
+        }
+    
+        return res.status(200).json({ blog });
+      } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: 'Internal server error' });
     }
-    catch (err) {
-        return console.log(err);
-    }
-
-    if (!blog){
-        return res.status(404).json({message: "No blog found"});
-    }
-
-    return res.status(200).json({blog});
 }
 
 
 export const addBlog = async (req, res, next) => {
-    const {title, description, image, user} = req.body;
+    const pool = req.db;
+    const {title, description, user} = req.body;
 
-    let existingUser;
-    try{
-        existingUser = await User.findById(user);
+    try {
+        // Check if the user exists by ID
+        const existingUser = await pool.query('SELECT id FROM "User" WHERE id = $1', [user]);
+        if (existingUser.rows.length === 0) {
+          return res.status(400).json({ message: 'Unable to find user' });
+        }
+
+        const id = uuidv4();
+    
+        // Insert the blog entry into the "blogs" table
+        const blogQuery = await pool.query(
+          'INSERT INTO "Blog" (id, title, description, "user") VALUES ($1, $2, $3, $4) RETURNING *',
+          [id, title, description, user]
+        );
+    
+        const blog = blogQuery.rows[0];
+    
+        return res.status(201).json({ blog });
+      } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: 'Internal server error' });
     }
-    catch (err) {
-        return console.log(err);
-    }   
-
-    if (!existingUser){
-        return res.status(400).json({message: "Unable to find user by this ID"});
-    }
-
-    const blog = new Blog ({
-        title,
-        description,
-        image, 
-        user,
-    });
-
-    try{
-        const session = await mongoose.startSession();
-        session.startTransaction(); //session is so all operations succeed or none
-        await blog.save();
-        existingUser.blogs.push(blog);
-        await existingUser.save({session});
-        await session.commitTransaction();
-    }
-    catch (err){
-        return console.log(err);
-    }
-
-    return res.status(201).json({blog});
 }
 
 export const updateBlog = async (req, res, next) =>{
+    const pool = req.db;
     const {title, description, image} = req.body;
     const blogId = req.params.id;
-    let blog;
-    try{
-        blog = await Blog.findByIdAndUpdate (blogId, {
-            title,
-            description,
-            image
-        }, { new: true });
-    }
-    catch (err) {
-        return console.log(err);
-    }
 
-    if (!blog){
-        return res.status(500).json({message: "Unable to update"});
-    }
-    return res.status(200).json({blog});
+    try {
+        const updateQuery = await pool.query(
+          'UPDATE "Blog" SET title = $1, description = $2 WHERE id = $3 RETURNING *',
+          [title, description, blogId]
+        );
+    
+        const updatedBlog = updateQuery.rows[0];
+    
+        if (!updatedBlog) {
+          return res.status(500).json({ message: 'Unable to update' });
+        }
+    
+        return res.status(200).json({ blog: updatedBlog });
+      } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: 'Internal server error' });
+      }
 }   
 
 export const deleteBlog = async (req, res, next) =>{
+    const pool = req.db;
     const blogId = req.params.id;
-    let blog;
-    try{
-        blog = await Blog.findByIdAndRemove(blogId).populate('user');
-        await blog.user.blogs.pull(blog);
-        await blog.user.save();
-    }
-    catch (err) {
-        return console.log(err);
-    }
-
-    if (!blog){
-        return res.status(500).json({message: "Unable to delete"});
-    }
-    return res.status(200).json({message: "Delete Successfully"});
+    try {
+        const existingBlog = await pool.query('SELECT id, "user" FROM "Blog" WHERE id = $1', [blogId]);
+    
+        if (existingBlog.rows.length === 0) {
+          return res.status(404).json({ message: 'Blog not found' });
+        }
+    
+        const blog = existingBlog.rows[0];
+        
+        await pool.query('DELETE FROM "Blog" WHERE id = $1', [blogId]);
+    
+        return res.status(200).json({ message: 'Delete Successful' });
+      } catch (err) {
+        console.error(err);
+        return res.status(500).json({ message: 'Internal server error' });
+      }
 }   
 
 export const getUserBlogs = async (req, res, next) => {
+    const pool = req.db;
     const userId = req.params.id;
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 3;
+    const offset = (page - 1) * limit;
 
-    let userBlogs;
     try {
-        userBlogs = await User.findById(userId);
+        const existingUser = await pool.query('SELECT id FROM "User" WHERE id = $1', [userId]);
+        if (existingUser.rows.length === 0) {
+          return res.status(400).json({ message: 'Unable to find user' });
+        }
+    
+        const blogsQuery = await pool.query(
+          'SELECT * FROM "Blog" WHERE "user" = $1 LIMIT $2 OFFSET $3',
+          [userId, limit, offset]
+        );
+    
+        const totalBlogsQuery = await pool.query('SELECT COUNT(*) FROM "Blog" WHERE "user" = $1', [userId]);
+    
+        const userBlogs = blogsQuery.rows;
+        const totalBlogs = parseInt(totalBlogsQuery.rows[0].count);
+    
+        return res.status(200).json({ userBlogs, totalBlogs });
     } catch (err) {
-        return console.log(err);
+        console.error(err);
+        return res.status(500).json({ message: 'Internal server error' });
     }
-
-    if (!userBlogs) {
-        return res.status(404).json({ message: "No blogs found" });
-    }
-
-    const totalBlogs = userBlogs.blogs.length;
-
-    userBlogs = await User.findById(userId)
-        .populate({
-            path: "blogs",
-            options: {
-                limit: limit,
-                skip: (page - 1) * limit,
-            }
-        });
-
-    return res.status(200).json({ userBlogs, totalBlogs });
 }
